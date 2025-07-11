@@ -65,6 +65,7 @@ import im.turms.server.common.infra.plugin.PluginManager;
 import im.turms.server.common.infra.property.TurmsPropertiesManager;
 import im.turms.server.common.infra.proto.ProtoDecoder;
 import im.turms.server.common.infra.proto.ProtoEncoder;
+import im.turms.server.common.infra.time.DateTimeUtil;
 import im.turms.server.common.infra.tracing.TracingCloseableContext;
 import im.turms.server.common.infra.tracing.TracingContext;
 import im.turms.service.access.servicerequest.dto.ClientRequest;
@@ -235,6 +236,7 @@ public class ServiceRequestDispatcher implements IServiceRequestDispatcher {
 
     private Mono<ServiceResponse> dispatch0(TracingContext context, ServiceRequest serviceRequest) {
         long requestTime = System.currentTimeMillis();
+        long startTime = System.nanoTime();
         // 1. Validate ServiceResponse
         Long userId = serviceRequest.getUserId();
         DeviceType deviceType = serviceRequest.getDeviceType();
@@ -346,19 +348,20 @@ public class ServiceRequestDispatcher implements IServiceRequestDispatcher {
                         if (!signal.isOnNext()) {
                             return;
                         }
-                        RequestHandlerResult requestResult = signal.get();
-                        if (requestResult == null
-                                || requestResult.code() != ResponseStatusCode.OK) {
+                        RequestHandlerResult requestHandlerResult = signal.get();
+                        if (requestHandlerResult == null
+                                || requestHandlerResult.code() != ResponseStatusCode.OK) {
                             return;
                         }
-                        notifyRelatedUsersOfAction(requestResult, userId, deviceType)
+                        turmsRequestBuffer.retain();
+                        notifyRelatedUsersOfAction(requestHandlerResult, userId, deviceType)
                                 .contextWrite(signal.getContextView())
                                 .subscribe(null, t -> {
                                     try (TracingCloseableContext ignored = context.asCloseable()) {
                                         LOGGER.error("Failed to notify related users of the action",
                                                 t);
                                     }
-                                });
+                                }, turmsRequestBuffer::release);
                     })
                     .onErrorResume(t -> {
                         ThrowableInfo info = ThrowableInfo.get(t);
@@ -393,7 +396,7 @@ public class ServiceRequestDispatcher implements IServiceRequestDispatcher {
                                     requestSize,
                                     requestTime,
                                     response,
-                                    System.currentTimeMillis() - requestTime);
+                                    (System.nanoTime() - startTime) / DateTimeUtil.NANOS_PER_MILLI);
                         }
                         return response;
                     });
@@ -489,7 +492,7 @@ public class ServiceRequestDispatcher implements IServiceRequestDispatcher {
                     recipients);
         }
         return mono
-                .map(offlineRecipientIds -> pluginManager.invokeExtensionPointsSequentially(
+                .flatMap(offlineRecipientIds -> pluginManager.invokeExtensionPointsSequentially(
                         RequestHandlerResultHandler.class,
                         RESULT_AFTER_NOTIFY_METHOD,
                         result,
